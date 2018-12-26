@@ -1,0 +1,1325 @@
+---
+title: "Simulation study with multiple runs"
+author: "Eric Fox"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    highlighted: default
+    theme: spacelab
+    toc: yes
+---
+
+```{r, eval=T, echo=T, message=F}
+devtools::load_all(".")
+library(randomForest)
+library(ggplot2)
+library(quantregForest)
+library(knitr)
+
+# set directories
+home_dir <- '/Users/ericfox/Documents/epa/'
+proj_dir <- paste0(home_dir, 'mmigeostat_proj/mmigeostat2/')
+loc_dir <- paste0(proj_dir, 'inst/simulation/sim20runs/loc_data/')
+
+# set parameter a for simulation model
+set_a <- function(lambda, var_g, var_h) {
+  num <- lambda * var_h
+  denom <- (1-lambda) * var_g
+  sqrt(num / denom)
+}
+
+# set parameter c for simulation model
+set_c <- function(a, rho, var_d, var_g, var_h) {
+  num <- rho * var_d
+  denom <- (1-rho) * (a^2 * var_g + var_h)
+  sqrt(num / denom)
+}
+```
+
+```{r, eval=T, echo=T}
+set.seed(200)
+
+# set up design matrix
+n <- 1500
+p <- 4
+nsim <- 20
+X <- list()
+coord <- list()
+for(k in 1:nsim) {
+  X[[k]] <- matrix(runif(n*p), nrow=n, ncol=p)
+  rownames(X[[k]]) <-  c(1:n)
+  colnames(X[[k]]) <- paste0('var', 1:p)
+  X[[k]] <- as.data.frame(X[[k]])
+  
+  # simulate random coordinates over unit square
+  coord[[k]] <- data.frame(x = runif(n), y = runif(n))
+  coord[[k]] <- as.matrix(coord[[k]])
+  rownames(coord[[k]]) <-  c(1:n)
+}
+
+# testing/training set
+test <- list()
+X_test <- X_train <- list()
+coord_test <- coord_train <- list()
+dist_mtx_train <- list()
+for(k in 1:nsim) {
+  test[[k]] <- sample(c(1:n), 1000)
+  X_test[[k]] <- X[[k]][test[[k]], ]
+  X_train[[k]] <- X[[k]][-test[[k]], ]
+  coord_test[[k]] <- coord[[k]][test[[k]], ]
+  coord_train[[k]] <- coord[[k]][-test[[k]], ]
+  dist_mtx_train[[k]] <- compute_distance(coord_train[[k]])
+}
+```
+
+```{r, eval=T, echo=T}
+# initialize data frame to store results
+sim_results <-  as.data.frame(matrix(999.9, nrow=8, ncol=14))
+names(sim_results) <- c('NL_L', 'Rsqr', 'nugg', 'parsil', 'a', 'c', 
+  'lm_rmse', 'lm_cov90', 'slm_rmse', 'slm_cov90', 
+  'rf_rmse', 'rf_cov90', 'rfrk_rmse', 'rfrk_cov90')
+rownames(sim_results) <- paste0('case', c(1:8))
+sim_results$NL_L <- rep(c('NL', 'L'), each=4)
+sim_results$Rsqr <- rep(c(0.1, 0.9), each=2, length.out = 8)
+sim_results$nugg <- rep(c(9,1), 4)
+sim_results$parsil <- rep(c(1,9), 4)
+```
+
+
+# Case 1
+
+* nonlinear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.1$
+* Low amount of autocorrelation: nugget=9, partial sill=1
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta1 <- list()
+for(k in 1:nsim) {
+  delta1[[k]] <- geo_sim(coord=coord[[k]], nugg=9, parsil=1, range=0.5)
+}
+# saveRDS(delta1, file=paste0(loc_dir, 'delta1.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta1 <- readRDS(paste0(loc_dir, 'delta1.rds'))
+a1 <- c1 <- c()
+y1_test <- y1_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a1[k] <- set_a(lambda=0.9, var(g), var(h))
+  c1[k] <- set_c(a=a1[k], rho=0.1, var(delta1[[k]]), var(g), var(h))
+  f1 <- a1[k]*g + h
+  y1 <- c1[k]*f1 + delta1[[k]]
+  # checks
+  varNL[k] <- var(a1[k]*g) / var(f1) 
+  rsqr[k] <- var(c1[k]*f1) / var(y1)
+
+  y1_test[[k]] <- y1[test[[k]]]
+  y1_train[[k]] <- y1[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a1)
+summary(c1)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm1_rmse <- c()
+lm1_cov90 <- c()
+for(k in 1:nsim) {
+  lm1 <- lm(y1_train[[k]] ~ ., data = X_train[[k]])
+  lm1_pred <- predict(lm1, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm1_pred <- as.data.frame(lm1_pred)  
+  lm1_rmse[k] <- compute_rmse(y1_test[[k]], lm1_pred$fit)
+  lm1_cov90[k] <- coverage2(y1_test[[k]], lm1_pred$lwr, lm1_pred$upr)
+}
+summary(lm1_rmse)
+summary(lm1_cov90)
+```
+
+## SLM
+```{r, eval=F, echo=T}
+splm1_rmse <- c()
+splm1_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y1_train[[k]]), 'parsil' = 0.5*var(y1_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm1 <- fit_splm(X = as.matrix(Xtmp), y = y1_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm1_pred <- pred_krige_batch(splm1,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y1_test[[k]]))
+  
+  splm1_rmse[k] <- compute_rmse(y1_test[[k]], splm1_pred[,1])
+  splm1_cov90[k] <- coverage(y1_test[[k]], splm1_pred[,1], splm1_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 6.290192 mins
+# saveRDS(splm1_rmse, file=paste0(loc_dir, 'splm1_rmse.rds'))
+# saveRDS(splm1_cov90, file=paste0(loc_dir, 'splm1_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm1_rmse <- readRDS(paste0(loc_dir, 'splm1_rmse.rds'))
+splm1_cov90 <- readRDS(paste0(loc_dir, 'splm1_cov90.rds'))
+summary(splm1_rmse)
+summary(splm1_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf1_rmse <- c()
+for(k in 1:nsim) {
+  rf1 <- randomForest(y1_train[[k]]~., data=X_train[[k]])
+  rf1_pred <- predict(rf1, newdata = X_test[[k]])
+  rf1_rmse[k] <- compute_rmse(y1_test[[k]], rf1_pred)
+}
+# saveRDS(rf1_rmse, file=paste0(loc_dir, 'rf1_rmse.rds'))
+
+rf1_cov90 <- c()
+for(k in 1:nsim) {
+  qrf1 <- quantregForest(X_train[[k]], y1_train[[k]])
+  qrf1_pred <- predict(qrf1, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf1_cov90[k] <- coverage2(y1_test[[k]], qrf1_pred[,1], qrf1_pred[,2])
+}
+# saveRDS(rf1_cov90, file=paste0(loc_dir, 'rf1_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf1_rmse <- readRDS(file=paste0(loc_dir, 'rf1_rmse.rds'))
+rf1_cov90 <- readRDS(file=paste0(loc_dir, 'rf1_cov90.rds'))
+summary(rf1_rmse)
+summary(rf1_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk1_rmse <- c()
+rfrk1_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf1 <- randomForest(y1_train[[k]]~., data=X_train[[k]])
+  rfrk1 <- fit_rfrk(rf1, y1_train[[k]], dist_mtx_train[[k]])
+  rfrk1_pred <- pred_rfrk(rf1, rfrk1, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk1_rmse[k] <- compute_rmse(y1_test[[k]], rfrk1_pred[,1])
+  rfrk1_cov90[k] <- coverage(y1_test[[k]], rfrk1_pred[,1], rfrk1_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 5.838787 mins
+# saveRDS(rfrk1_rmse, paste0(loc_dir, 'rfrk1_rmse.rds'))
+# saveRDS(rfrk1_cov90, paste0(loc_dir, 'rfrk1_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk1_rmse <- readRDS(file=paste0(loc_dir, 'rfrk1_rmse.rds'))
+rfrk1_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk1_cov90.rds'))
+summary(rfrk1_rmse)
+summary(rfrk1_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[1, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a1, c1, lm1_rmse, lm1_cov90, splm1_rmse, splm1_cov90, 
+    rf1_rmse, rf1_cov90, rfrk1_rmse, rfrk1_cov90), mean)
+```
+
+
+# Case 2
+
+* nonlinear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.1$
+* High amount of autocorrelation: nugget=1, partial sill=9
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta2 <- list()
+for(k in 1:nsim) {
+  delta2[[k]] <- geo_sim(coord=coord[[k]], nugg=1, parsil=9, range=0.5)
+}
+# saveRDS(delta2, file=paste0(loc_dir, 'delta2.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta2 <- readRDS(paste0(loc_dir, 'delta2.rds'))
+a2 <- c2 <- c()
+y2_test <- y2_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a2[k] <- set_a(lambda=0.9, var(g), var(h))
+  c2[k] <- set_c(a=a2[k], rho=0.1, var(delta2[[k]]), var(g), var(h))
+  f2 <- a2[k]*g + h
+  y2 <- c2[k]*f2 + delta2[[k]]
+  # checks
+  varNL[k] <- var(a2[k]*g) / var(f2) 
+  rsqr[k] <- var(c2[k]*f2) / var(y2)
+
+  y2_test[[k]] <- y2[test[[k]]]
+  y2_train[[k]] <- y2[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a2)
+summary(c2)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm2_rmse <- c()
+lm2_cov90 <- c()
+for(k in 1:nsim) {
+  lm2 <- lm(y2_train[[k]] ~ ., data = X_train[[k]])
+  lm2_pred <- predict(lm2, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm2_pred <- as.data.frame(lm2_pred)  
+  lm2_rmse[k] <- compute_rmse(y2_test[[k]], lm2_pred$fit)
+  lm2_cov90[k] <- coverage2(y2_test[[k]], lm2_pred$lwr, lm2_pred$upr)
+}
+summary(lm2_rmse)
+summary(lm2_cov90)
+```
+
+## SLM
+```{r, eval=F, echo=T}
+splm2_rmse <- c()
+splm2_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y2_train[[k]]), 'parsil' = 0.5*var(y2_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm2 <- fit_splm(X = as.matrix(Xtmp), y = y2_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm2_pred <- pred_krige_batch(splm2,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y2_test[[k]]))
+  
+  splm2_rmse[k] <- compute_rmse(y2_test[[k]], splm2_pred[,1])
+  splm2_cov90[k] <- coverage(y2_test[[k]], splm2_pred[,1], splm2_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 6.075518 mins
+# saveRDS(splm2_rmse, file=paste0(loc_dir, 'splm2_rmse.rds'))
+# saveRDS(splm2_cov90, file=paste0(loc_dir, 'splm2_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm2_rmse <- readRDS(paste0(loc_dir, 'splm2_rmse.rds'))
+splm2_cov90 <- readRDS(paste0(loc_dir, 'splm2_cov90.rds'))
+summary(splm2_rmse)
+summary(splm2_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf2_rmse <- c()
+for(k in 1:nsim) {
+  rf2 <- randomForest(y2_train[[k]]~., data=X_train[[k]])
+  rf2_pred <- predict(rf2, newdata = X_test[[k]])
+  rf2_rmse[k] <- compute_rmse(y2_test[[k]], rf2_pred)
+}
+# saveRDS(rf2_rmse, file=paste0(loc_dir, 'rf2_rmse.rds'))
+
+rf2_cov90 <- c()
+for(k in 1:nsim) {
+  qrf2 <- quantregForest(X_train[[k]], y2_train[[k]])
+  qrf2_pred <- predict(qrf2, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf2_cov90[k] <- coverage2(y2_test[[k]], qrf2_pred[,1], qrf2_pred[,2])
+}
+# saveRDS(rf2_cov90, file=paste0(loc_dir, 'rf2_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf2_rmse <- readRDS(file=paste0(loc_dir, 'rf2_rmse.rds'))
+rf2_cov90 <- readRDS(file=paste0(loc_dir, 'rf2_cov90.rds'))
+summary(rf2_rmse)
+summary(rf2_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk2_rmse <- c()
+rfrk2_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf2 <- randomForest(y2_train[[k]]~., data=X_train[[k]])
+  rfrk2 <- fit_rfrk(rf2, y2_train[[k]], dist_mtx_train[[k]])
+  rfrk2_pred <- pred_rfrk(rf2, rfrk2, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk2_rmse[k] <- compute_rmse(y2_test[[k]], rfrk2_pred[,1])
+  rfrk2_cov90[k] <- coverage(y2_test[[k]], rfrk2_pred[,1], rfrk2_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 4.922683 mins
+# saveRDS(rfrk2_rmse, paste0(loc_dir, 'rfrk2_rmse.rds'))
+# saveRDS(rfrk2_cov90, paste0(loc_dir, 'rfrk2_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk2_rmse <- readRDS(file=paste0(loc_dir, 'rfrk2_rmse.rds'))
+rfrk2_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk2_cov90.rds'))
+summary(rfrk2_rmse)
+summary(rfrk2_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[2, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a2, c2, lm2_rmse, lm2_cov90, splm2_rmse, splm2_cov90, 
+    rf2_rmse, rf2_cov90, rfrk2_rmse, rfrk2_cov90), mean)
+```
+
+
+# Case 3
+
+* nonlinear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.9$
+* Low amount of autocorrelation: nugget=9, partial sill=1
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta3 <- list()
+for(k in 1:nsim) {
+  delta3[[k]] <- geo_sim(coord=coord[[k]], nugg=9, parsil=1, range=0.5)
+}
+# saveRDS(delta3, file=paste0(loc_dir, 'delta3.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta3 <- readRDS(paste0(loc_dir, 'delta3.rds'))
+a3 <- c3 <- c()
+y3_test <- y3_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a3[k] <- set_a(lambda=0.9, var(g), var(h))
+  c3[k] <- set_c(a=a3[k], rho=0.9, var(delta3[[k]]), var(g), var(h))
+  f3 <- a3[k]*g + h
+  y3 <- c3[k]*f3 + delta3[[k]]
+  # checks
+  varNL[k] <- var(a3[k]*g) / var(f3) 
+  rsqr[k] <- var(c3[k]*f3) / var(y3)
+
+  y3_test[[k]] <- y3[test[[k]]]
+  y3_train[[k]] <- y3[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a3)
+summary(c3)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm3_rmse <- c()
+lm3_cov90 <- c()
+for(k in 1:nsim) {
+  lm3 <- lm(y3_train[[k]] ~ ., data = X_train[[k]])
+  lm3_pred <- predict(lm3, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm3_pred <- as.data.frame(lm3_pred)  
+  lm3_rmse[k] <- compute_rmse(y3_test[[k]], lm3_pred$fit)
+  lm3_cov90[k] <- coverage2(y3_test[[k]], lm3_pred$lwr, lm3_pred$upr)
+}
+summary(lm3_rmse)
+summary(lm3_cov90)
+```
+
+## SLM
+```{r, eval=F, echo=T}
+splm3_rmse <- c()
+splm3_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:20) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y3_train[[k]]), 'parsil' = 0.5*var(y3_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm3 <- fit_splm(X = as.matrix(Xtmp), y = y3_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm3_pred <- pred_krige_batch(splm3,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y3_test[[k]]))
+  
+  splm3_rmse[k] <- compute_rmse(y3_test[[k]], splm3_pred[,1])
+  splm3_cov90[k] <- coverage(y3_test[[k]], splm3_pred[,1], splm3_pred[,2])
+  print(k)
+}
+end_time <- Sys.time()
+end_time - start_time
+# saveRDS(splm3_rmse, file=paste0(loc_dir, 'splm3_rmse.rds'))
+# saveRDS(splm3_cov90, file=paste0(loc_dir, 'splm3_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm3_rmse <- readRDS(paste0(loc_dir, 'splm3_rmse.rds'))
+splm3_cov90 <- readRDS(paste0(loc_dir, 'splm3_cov90.rds'))
+summary(splm3_rmse)
+summary(splm3_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf3_rmse <- c()
+for(k in 1:nsim) {
+  rf3 <- randomForest(y3_train[[k]]~., data=X_train[[k]])
+  rf3_pred <- predict(rf3, newdata = X_test[[k]])
+  rf3_rmse[k] <- compute_rmse(y3_test[[k]], rf3_pred)
+}
+# saveRDS(rf3_rmse, file=paste0(loc_dir, 'rf3_rmse.rds'))
+
+rf3_cov90 <- c()
+for(k in 1:nsim) {
+  qrf3 <- quantregForest(X_train[[k]], y3_train[[k]])
+  qrf3_pred <- predict(qrf3, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf3_cov90[k] <- coverage2(y3_test[[k]], qrf3_pred[,1], qrf3_pred[,2])
+}
+# saveRDS(rf3_cov90, file=paste0(loc_dir, 'rf3_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf3_rmse <- readRDS(file=paste0(loc_dir, 'rf3_rmse.rds'))
+rf3_cov90 <- readRDS(file=paste0(loc_dir, 'rf3_cov90.rds'))
+summary(rf3_rmse)
+summary(rf3_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk3_rmse <- c()
+rfrk3_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf3 <- randomForest(y3_train[[k]]~., data=X_train[[k]])
+  rfrk3 <- fit_rfrk(rf3, y3_train[[k]], dist_mtx_train[[k]])
+  rfrk3_pred <- pred_rfrk(rf3, rfrk3, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk3_rmse[k] <- compute_rmse(y3_test[[k]], rfrk3_pred[,1])
+  rfrk3_cov90[k] <- coverage(y3_test[[k]], rfrk3_pred[,1], rfrk3_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 5.537296 mins
+# saveRDS(rfrk3_rmse, paste0(loc_dir, 'rfrk3_rmse.rds'))
+# saveRDS(rfrk3_cov90, paste0(loc_dir, 'rfrk3_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk3_rmse <- readRDS(file=paste0(loc_dir, 'rfrk3_rmse.rds'))
+rfrk3_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk3_cov90.rds'))
+summary(rfrk3_rmse)
+summary(rfrk3_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[3, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a3, c3, lm3_rmse, lm3_cov90, splm3_rmse, splm3_cov90, 
+    rf3_rmse, rf3_cov90, rfrk3_rmse, rfrk3_cov90), mean)
+```
+
+
+# Case 4
+
+* nonlinear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.9$
+* High amount of autocorrelation: nugget=1, partial sill=9
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta4 <- list()
+for(k in 1:nsim) {
+  delta4[[k]] <- geo_sim(coord=coord[[k]], nugg=1, parsil=9, range=0.5)
+}
+# saveRDS(delta4, file=paste0(loc_dir, 'delta4.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta4 <- readRDS(paste0(loc_dir, 'delta4.rds'))
+a4 <- c4 <- c()
+y4_test <- y4_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a4[k] <- set_a(lambda=0.9, var(g), var(h))
+  c4[k] <- set_c(a=a4[k], rho=0.9, var(delta4[[k]]), var(g), var(h))
+  f4 <- a4[k]*g + h
+  y4 <- c4[k]*f4 + delta4[[k]]
+  # checks
+  varNL[k] <- var(a4[k]*g) / var(f4) 
+  rsqr[k] <- var(c4[k]*f4) / var(y4)
+
+  y4_test[[k]] <- y4[test[[k]]]
+  y4_train[[k]] <- y4[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a4)
+summary(c4)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm4_rmse <- c()
+lm4_cov90 <- c()
+for(k in 1:nsim) {
+  lm4 <- lm(y4_train[[k]] ~ ., data = X_train[[k]])
+  lm4_pred <- predict(lm4, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm4_pred <- as.data.frame(lm4_pred)  
+  lm4_rmse[k] <- compute_rmse(y4_test[[k]], lm4_pred$fit)
+  lm4_cov90[k] <- coverage2(y4_test[[k]], lm4_pred$lwr, lm4_pred$upr)
+}
+summary(lm4_rmse)
+summary(lm4_cov90)
+```
+
+## SLM
+```{r, eval=F, echo=T}
+splm4_rmse <- c()
+splm4_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:20) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y4_train[[k]]), 'parsil' = 0.5*var(y4_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm4 <- fit_splm(X = as.matrix(Xtmp), y = y4_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm4_pred <- pred_krige_batch(splm4,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y4_test[[k]]))
+  
+  splm4_rmse[k] <- compute_rmse(y4_test[[k]], splm4_pred[,1])
+  splm4_cov90[k] <- coverage(y4_test[[k]], splm4_pred[,1], splm4_pred[,2])
+  print(k)
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 5.5933 mins
+# saveRDS(splm4_rmse, file=paste0(loc_dir, 'splm4_rmse.rds'))
+# saveRDS(splm4_cov90, file=paste0(loc_dir, 'splm4_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm4_rmse <- readRDS(paste0(loc_dir, 'splm4_rmse.rds'))
+splm4_cov90 <- readRDS(paste0(loc_dir, 'splm4_cov90.rds'))
+summary(splm4_rmse)
+summary(splm4_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf4_rmse <- c()
+for(k in 1:nsim) {
+  rf4 <- randomForest(y4_train[[k]]~., data=X_train[[k]])
+  rf4_pred <- predict(rf4, newdata = X_test[[k]])
+  rf4_rmse[k] <- compute_rmse(y4_test[[k]], rf4_pred)
+}
+# saveRDS(rf4_rmse, file=paste0(loc_dir, 'rf4_rmse.rds'))
+
+rf4_cov90 <- c()
+for(k in 1:nsim) {
+  qrf4 <- quantregForest(X_train[[k]], y4_train[[k]])
+  qrf4_pred <- predict(qrf4, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf4_cov90[k] <- coverage2(y4_test[[k]], qrf4_pred[,1], qrf4_pred[,2])
+}
+# saveRDS(rf4_cov90, file=paste0(loc_dir, 'rf4_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf4_rmse <- readRDS(file=paste0(loc_dir, 'rf4_rmse.rds'))
+rf4_cov90 <- readRDS(file=paste0(loc_dir, 'rf4_cov90.rds'))
+summary(rf4_rmse)
+summary(rf4_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk4_rmse <- c()
+rfrk4_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf4 <- randomForest(y4_train[[k]]~., data=X_train[[k]])
+  rfrk4 <- fit_rfrk(rf4, y4_train[[k]], dist_mtx_train[[k]])
+  rfrk4_pred <- pred_rfrk(rf4, rfrk4, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk4_rmse[k] <- compute_rmse(y4_test[[k]], rfrk4_pred[,1])
+  rfrk4_cov90[k] <- coverage(y4_test[[k]], rfrk4_pred[,1], rfrk4_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 4.998483 mins
+# saveRDS(rfrk4_rmse, paste0(loc_dir, 'rfrk4_rmse.rds'))
+# saveRDS(rfrk4_cov90, paste0(loc_dir, 'rfrk4_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk4_rmse <- readRDS(file=paste0(loc_dir, 'rfrk4_rmse.rds'))
+rfrk4_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk4_cov90.rds'))
+summary(rfrk4_rmse)
+summary(rfrk4_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[4, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a4, c4, lm4_rmse, lm4_cov90, splm4_rmse, splm4_cov90, 
+    rf4_rmse, rf4_cov90, rfrk4_rmse, rfrk4_cov90), mean)
+```
+
+
+# Case 5
+
+* linear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.1$
+* Low amount of autocorrelation: nugget=9, partial sill=1
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta5 <- list()
+for(k in 1:nsim) {
+  delta5[[k]] <- geo_sim(coord=coord[[k]], nugg=9, parsil=1, range=0.5)
+}
+# saveRDS(delta5, file=paste0(loc_dir, 'delta5.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta5 <- readRDS(paste0(loc_dir, 'delta5.rds'))
+a5 <- c5 <- c()
+y5_test <- y5_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a5[k] <- set_a(lambda=0.1, var(g), var(h))
+  c5[k] <- set_c(a=a5[k], rho=0.1, var(delta5[[k]]), var(g), var(h))
+  f5 <- a5[k]*g + h
+  y5 <- c5[k]*f5 + delta5[[k]]
+  # checks
+  varNL[k] <- var(a5[k]*g) / var(f5) 
+  rsqr[k] <- var(c5[k]*f5) / var(y5)
+
+  y5_test[[k]] <- y5[test[[k]]]
+  y5_train[[k]] <- y5[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a5)
+summary(c5)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm5_rmse <- c()
+lm5_cov90 <- c()
+for(k in 1:nsim) {
+  lm5 <- lm(y5_train[[k]] ~ ., data = X_train[[k]])
+  lm5_pred <- predict(lm5, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm5_pred <- as.data.frame(lm5_pred)  
+  lm5_rmse[k] <- compute_rmse(y5_test[[k]], lm5_pred$fit)
+  lm5_cov90[k] <- coverage2(y5_test[[k]], lm5_pred$lwr, lm5_pred$upr)
+}
+summary(lm5_rmse)
+summary(lm5_cov90)
+```
+
+## SLM
+```{r, eval=F, echo=T}
+splm5_rmse <- c()
+splm5_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y5_train[[k]]), 'parsil' = 0.5*var(y5_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm5 <- fit_splm(X = as.matrix(Xtmp), y = y5_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm5_pred <- pred_krige_batch(splm5,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y5_test[[k]]))
+  
+  splm5_rmse[k] <- compute_rmse(y5_test[[k]], splm5_pred[,1])
+  splm5_cov90[k] <- coverage(y5_test[[k]], splm5_pred[,1], splm5_pred[,2])
+}
+# Time difference of 7.105356 mins
+end_time <- Sys.time()
+end_time - start_time
+# saveRDS(splm5_rmse, file=paste0(loc_dir, 'splm5_rmse.rds'))
+# saveRDS(splm5_cov90, file=paste0(loc_dir, 'splm5_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm5_rmse <- readRDS(paste0(loc_dir, 'splm5_rmse.rds'))
+splm5_cov90 <- readRDS(paste0(loc_dir, 'splm5_cov90.rds'))
+summary(splm5_rmse)
+summary(splm5_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf5_rmse <- c()
+for(k in 1:nsim) {
+  rf5 <- randomForest(y5_train[[k]]~., data=X_train[[k]])
+  rf5_pred <- predict(rf5, newdata = X_test[[k]])
+  rf5_rmse[k] <- compute_rmse(y5_test[[k]], rf5_pred)
+}
+# saveRDS(rf5_rmse, file=paste0(loc_dir, 'rf5_rmse.rds'))
+
+rf5_cov90 <- c()
+for(k in 1:nsim) {
+  qrf5 <- quantregForest(X_train[[k]], y5_train[[k]])
+  qrf5_pred <- predict(qrf5, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf5_cov90[k] <- coverage2(y5_test[[k]], qrf5_pred[,1], qrf5_pred[,2])
+}
+# saveRDS(rf5_cov90, file=paste0(loc_dir, 'rf5_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf5_rmse <- readRDS(file=paste0(loc_dir, 'rf5_rmse.rds'))
+rf5_cov90 <- readRDS(file=paste0(loc_dir, 'rf5_cov90.rds'))
+summary(rf5_rmse)
+summary(rf5_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk5_rmse <- c()
+rfrk5_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf5 <- randomForest(y5_train[[k]]~., data=X_train[[k]])
+  rfrk5 <- fit_rfrk(rf5, y5_train[[k]], dist_mtx_train[[k]])
+  rfrk5_pred <- pred_rfrk(rf5, rfrk5, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk5_rmse[k] <- compute_rmse(y5_test[[k]], rfrk5_pred[,1])
+  rfrk5_cov90[k] <- coverage(y5_test[[k]], rfrk5_pred[,1], rfrk5_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 5.506776 mins
+# saveRDS(rfrk5_rmse, paste0(loc_dir, 'rfrk5_rmse.rds'))
+# saveRDS(rfrk5_cov90, paste0(loc_dir, 'rfrk5_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk5_rmse <- readRDS(file=paste0(loc_dir, 'rfrk5_rmse.rds'))
+rfrk5_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk5_cov90.rds'))
+summary(rfrk5_rmse)
+summary(rfrk5_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[5, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a5, c5, lm5_rmse, lm5_cov90, splm5_rmse, splm5_cov90, 
+    rf5_rmse, rf5_cov90, rfrk5_rmse, rfrk5_cov90), mean)
+```
+
+
+# Case 6
+
+* linear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.1$
+* High amount of autocorrelation: nugget=1, partial sill=9
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta6 <- list()
+for(k in 1:nsim) {
+  delta6[[k]] <- geo_sim(coord=coord[[k]], nugg=1, parsil=9, range=0.5)
+}
+# saveRDS(delta6, file=paste0(loc_dir, 'delta6.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta6 <- readRDS(paste0(loc_dir, 'delta6.rds'))
+a6 <- c6 <- c()
+y6_test <- y6_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a6[k] <- set_a(lambda=0.1, var(g), var(h))
+  c6[k] <- set_c(a=a6[k], rho=0.1, var(delta6[[k]]), var(g), var(h))
+  f6 <- a6[k]*g + h
+  y6 <- c6[k]*f6 + delta6[[k]]
+  # checks
+  varNL[k] <- var(a6[k]*g) / var(f6) 
+  rsqr[k] <- var(c6[k]*f6) / var(y6)
+
+  y6_test[[k]] <- y6[test[[k]]]
+  y6_train[[k]] <- y6[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a6)
+summary(c6)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm6_rmse <- c()
+lm6_cov90 <- c()
+for(k in 1:nsim) {
+  lm6 <- lm(y6_train[[k]] ~ ., data = X_train[[k]])
+  lm6_pred <- predict(lm6, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm6_pred <- as.data.frame(lm6_pred)  
+  lm6_rmse[k] <- compute_rmse(y6_test[[k]], lm6_pred$fit)
+  lm6_cov90[k] <- coverage2(y6_test[[k]], lm6_pred$lwr, lm6_pred$upr)
+}
+summary(lm6_rmse)
+summary(lm6_cov90)
+```
+
+## SLM
+```{r, eval=F, echo=T}
+splm6_rmse <- c()
+splm6_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y6_train[[k]]), 'parsil' = 0.5*var(y6_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm6 <- fit_splm(X = as.matrix(Xtmp), y = y6_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm6_pred <- pred_krige_batch(splm6,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y6_test[[k]]))
+  
+  splm6_rmse[k] <- compute_rmse(y6_test[[k]], splm6_pred[,1])
+  splm6_cov90[k] <- coverage(y6_test[[k]], splm6_pred[,1], splm6_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# saveRDS(splm6_rmse, file=paste0(loc_dir, 'splm6_rmse.rds'))
+# saveRDS(splm6_cov90, file=paste0(loc_dir, 'splm6_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm6_rmse <- readRDS(paste0(loc_dir, 'splm6_rmse.rds'))
+splm6_cov90 <- readRDS(paste0(loc_dir, 'splm6_cov90.rds'))
+summary(splm6_rmse)
+summary(splm6_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf6_rmse <- c()
+for(k in 1:nsim) {
+  rf6 <- randomForest(y6_train[[k]]~., data=X_train[[k]])
+  rf6_pred <- predict(rf6, newdata = X_test[[k]])
+  rf6_rmse[k] <- compute_rmse(y6_test[[k]], rf6_pred)
+}
+# saveRDS(rf6_rmse, file=paste0(loc_dir, 'rf6_rmse.rds'))
+
+rf6_cov90 <- c()
+for(k in 1:nsim) {
+  qrf6 <- quantregForest(X_train[[k]], y6_train[[k]])
+  qrf6_pred <- predict(qrf6, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf6_cov90[k] <- coverage2(y6_test[[k]], qrf6_pred[,1], qrf6_pred[,2])
+}
+# saveRDS(rf6_cov90, file=paste0(loc_dir, 'rf6_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf6_rmse <- readRDS(file=paste0(loc_dir, 'rf6_rmse.rds'))
+rf6_cov90 <- readRDS(file=paste0(loc_dir, 'rf6_cov90.rds'))
+summary(rf6_rmse)
+summary(rf6_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk6_rmse <- c()
+rfrk6_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf6 <- randomForest(y6_train[[k]]~., data=X_train[[k]])
+  rfrk6 <- fit_rfrk(rf6, y6_train[[k]], dist_mtx_train[[k]])
+  rfrk6_pred <- pred_rfrk(rf6, rfrk6, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk6_rmse[k] <- compute_rmse(y6_test[[k]], rfrk6_pred[,1])
+  rfrk6_cov90[k] <- coverage(y6_test[[k]], rfrk6_pred[,1], rfrk6_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 5.740583 mins
+# saveRDS(rfrk6_rmse, paste0(loc_dir, 'rfrk6_rmse.rds'))
+# saveRDS(rfrk6_cov90, paste0(loc_dir, 'rfrk6_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk6_rmse <- readRDS(file=paste0(loc_dir, 'rfrk6_rmse.rds'))
+rfrk6_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk6_cov90.rds'))
+summary(rfrk6_rmse)
+summary(rfrk6_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[6, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a6, c6, lm6_rmse, lm6_cov90, splm6_rmse, splm6_cov90, 
+    rf6_rmse, rf6_cov90, rfrk6_rmse, rfrk6_cov90), mean)
+```
+
+
+# Case 7
+
+* linear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.9$
+* Low amount of autocorrelation: nugget=9, partial sill=1
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta7 <- list()
+for(k in 1:nsim) {
+  delta7[[k]] <- geo_sim(coord=coord[[k]], nugg=9, parsil=1, range=0.5)
+}
+# saveRDS(delta7, file=paste0(loc_dir, 'delta7.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta7 <- readRDS(paste0(loc_dir, 'delta7.rds'))
+a7 <- c7 <- c()
+y7_test <- y7_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a7[k] <- set_a(lambda=0.1, var(g), var(h))
+  c7[k] <- set_c(a=a7[k], rho=0.9, var(delta7[[k]]), var(g), var(h))
+  f7 <- a7[k]*g + h
+  y7 <- c7[k]*f7 + delta7[[k]]
+  # checks
+  varNL[k] <- var(a7[k]*g) / var(f7) 
+  rsqr[k] <- var(c7[k]*f7) / var(y7)
+
+  y7_test[[k]] <- y7[test[[k]]]
+  y7_train[[k]] <- y7[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a7)
+summary(c7)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm7_rmse <- c()
+lm7_cov90 <- c()
+for(k in 1:nsim) {
+  lm7 <- lm(y7_train[[k]] ~ ., data = X_train[[k]])
+  lm7_pred <- predict(lm7, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm7_pred <- as.data.frame(lm7_pred)  
+  lm7_rmse[k] <- compute_rmse(y7_test[[k]], lm7_pred$fit)
+  lm7_cov90[k] <- coverage2(y7_test[[k]], lm7_pred$lwr, lm7_pred$upr)
+}
+summary(lm7_rmse)
+summary(lm7_cov90)
+```
+
+## SLM
+```{r, eval=F, echo=T}
+splm7_rmse <- c()
+splm7_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y7_train[[k]]), 'parsil' = 0.5*var(y7_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm7 <- fit_splm(X = as.matrix(Xtmp), y = y7_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm7_pred <- pred_krige_batch(splm7,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y7_test[[k]]))
+  
+  splm7_rmse[k] <- compute_rmse(y7_test[[k]], splm7_pred[,1])
+  splm7_cov90[k] <- coverage(y7_test[[k]], splm7_pred[,1], splm7_pred[,2])
+  print(k)
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 5.724878 mins
+# saveRDS(splm7_rmse, file=paste0(loc_dir, 'splm7_rmse.rds'))
+# saveRDS(splm7_cov90, file=paste0(loc_dir, 'splm7_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm7_rmse <- readRDS(paste0(loc_dir, 'splm7_rmse.rds'))
+splm7_cov90 <- readRDS(paste0(loc_dir, 'splm7_cov90.rds'))
+summary(splm7_rmse)
+summary(splm7_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf7_rmse <- c()
+for(k in 1:nsim) {
+  rf7 <- randomForest(y7_train[[k]]~., data=X_train[[k]])
+  rf7_pred <- predict(rf7, newdata = X_test[[k]])
+  rf7_rmse[k] <- compute_rmse(y7_test[[k]], rf7_pred)
+}
+# saveRDS(rf7_rmse, file=paste0(loc_dir, 'rf7_rmse.rds'))
+
+rf7_cov90 <- c()
+for(k in 1:nsim) {
+  qrf7 <- quantregForest(X_train[[k]], y7_train[[k]])
+  qrf7_pred <- predict(qrf7, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf7_cov90[k] <- coverage2(y7_test[[k]], qrf7_pred[,1], qrf7_pred[,2])
+}
+# saveRDS(rf7_cov90, file=paste0(loc_dir, 'rf7_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf7_rmse <- readRDS(file=paste0(loc_dir, 'rf7_rmse.rds'))
+rf7_cov90 <- readRDS(file=paste0(loc_dir, 'rf7_cov90.rds'))
+summary(rf7_rmse)
+summary(rf7_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk7_rmse <- c()
+rfrk7_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf7 <- randomForest(y7_train[[k]]~., data=X_train[[k]])
+  rfrk7 <- fit_rfrk(rf7, y7_train[[k]], dist_mtx_train[[k]])
+  rfrk7_pred <- pred_rfrk(rf7, rfrk7, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk7_rmse[k] <- compute_rmse(y7_test[[k]], rfrk7_pred[,1])
+  rfrk7_cov90[k] <- coverage(y7_test[[k]], rfrk7_pred[,1], rfrk7_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 4.743292 mins
+# saveRDS(rfrk7_rmse, paste0(loc_dir, 'rfrk7_rmse.rds'))
+# saveRDS(rfrk7_cov90, paste0(loc_dir, 'rfrk7_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk7_rmse <- readRDS(file=paste0(loc_dir, 'rfrk7_rmse.rds'))
+rfrk7_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk7_cov90.rds'))
+summary(rfrk7_rmse)
+summary(rfrk7_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[7, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a7, c7, lm7_rmse, lm7_cov90, splm7_rmse, splm7_cov90, 
+    rf7_rmse, rf7_cov90, rfrk7_rmse, rfrk7_cov90), mean)
+```
+
+
+# Case 8
+
+* linear term dominates (explains 90% of the variation in the function)
+* $R^2 = 0.9$
+* High amount of autocorrelation: nugget=1, partial sill=9
+
+```{r, eval=F, echo=T}
+# simulate error term
+set.seed(500)
+delta8 <- list()
+for(k in 1:nsim) {
+  delta8[[k]] <- geo_sim(coord=coord[[k]], nugg=1, parsil=9, range=0.5)
+}
+# saveRDS(delta8, file=paste0(loc_dir, 'delta8.rds'))
+```
+
+```{r, eval=T, echo=T}
+delta8 <- readRDS(paste0(loc_dir, 'delta8.rds'))
+a8 <- c8 <- c()
+y8_test <- y8_train <- list()
+varNL <- rsqr <- c()
+for(k in 1:nsim) {
+  g <- sin(5*pi*X[[k]][,1]*X[[k]][,2])
+  h <- 2*X[[k]][,3] - X[[k]][,4]
+  a8[k] <- set_a(lambda=0.1, var(g), var(h))
+  c8[k] <- set_c(a=a8[k], rho=0.9, var(delta8[[k]]), var(g), var(h))
+  f8 <- a8[k]*g + h
+  y8 <- c8[k]*f8 + delta8[[k]]
+  # checks
+  varNL[k] <- var(a8[k]*g) / var(f8) 
+  rsqr[k] <- var(c8[k]*f8) / var(y8)
+
+  y8_test[[k]] <- y8[test[[k]]]
+  y8_train[[k]] <- y8[-test[[k]]]
+}
+
+summary(rsqr)
+summary(varNL)
+summary(a8)
+summary(c8)
+```
+
+## LM
+```{r, eval=T, echo=T}
+lm8_rmse <- c()
+lm8_cov90 <- c()
+for(k in 1:nsim) {
+  lm8 <- lm(y8_train[[k]] ~ ., data = X_train[[k]])
+  lm8_pred <- predict(lm8, newdata = X_test[[k]], interval='prediction', level=0.9)
+  lm8_pred <- as.data.frame(lm8_pred)  
+  lm8_rmse[k] <- compute_rmse(y8_test[[k]], lm8_pred$fit)
+  lm8_cov90[k] <- coverage2(y8_test[[k]], lm8_pred$lwr, lm8_pred$upr)
+}
+summary(lm8_rmse)
+summary(lm8_cov90)
+```
+## SLM
+```{r, eval=F, echo=T}
+splm8_rmse <- c()
+splm8_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  Xtmp <- data.frame(Intercept=1, X_train[[k]])
+  theta_ini <- log(c('nugg' = 0.5*var(y8_train[[k]]), 'parsil' = 0.5*var(y8_train[[k]]), 'range' = mean(dist_mtx_train[[k]])))
+  splm8 <- fit_splm(X = as.matrix(Xtmp), y = y8_train[[k]], cov_type = 'exponential', theta_ini = theta_ini, 
+    dist_mtx = dist_mtx_train[[k]], est_meth = 'REML')
+  
+  # make predictions
+  Xp <- data.frame(Intercept=1, X_test[[k]])
+  splm8_pred <- pred_krige_batch(splm8,
+    obsv_coord = coord_train[[k]], pred_coord = coord_test[[k]],
+    Xp = as.matrix(Xp), row_names = names(y8_test[[k]]))
+  
+  splm8_rmse[k] <- compute_rmse(y8_test[[k]], splm8_pred[,1])
+  splm8_cov90[k] <- coverage(y8_test[[k]], splm8_pred[,1], splm8_pred[,2])
+  print(k)
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 7.763793 mins
+# saveRDS(splm8_rmse, file=paste0(loc_dir, 'splm8_rmse.rds'))
+# saveRDS(splm8_cov90, file=paste0(loc_dir, 'splm8_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+splm8_rmse <- readRDS(paste0(loc_dir, 'splm8_rmse.rds'))
+splm8_cov90 <- readRDS(paste0(loc_dir, 'splm8_cov90.rds'))
+summary(splm8_rmse)
+summary(splm8_cov90)
+```
+
+## RF
+```{r, eval=F, echo=T}
+set.seed(50)
+rf8_rmse <- c()
+for(k in 1:nsim) {
+  rf8 <- randomForest(y8_train[[k]]~., data=X_train[[k]])
+  rf8_pred <- predict(rf8, newdata = X_test[[k]])
+  rf8_rmse[k] <- compute_rmse(y8_test[[k]], rf8_pred)
+}
+# saveRDS(rf8_rmse, file=paste0(loc_dir, 'rf8_rmse.rds'))
+
+rf8_cov90 <- c()
+for(k in 1:nsim) {
+  qrf8 <- quantregForest(X_train[[k]], y8_train[[k]])
+  qrf8_pred <- predict(qrf8, newdata = X_test[[k]], what = c(0.05, 0.95))  
+  rf8_cov90[k] <- coverage2(y8_test[[k]], qrf8_pred[,1], qrf8_pred[,2])
+}
+# saveRDS(rf8_cov90, file=paste0(loc_dir, 'rf8_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rf8_rmse <- readRDS(file=paste0(loc_dir, 'rf8_rmse.rds'))
+rf8_cov90 <- readRDS(file=paste0(loc_dir, 'rf8_cov90.rds'))
+summary(rf8_rmse)
+summary(rf8_cov90)
+```
+
+## RFRK
+```{r, eval=F, echo=T}
+set.seed(50)
+rfrk8_rmse <- c()
+rfrk8_cov90 <- c()
+start_time <- Sys.time()
+for(k in 1:nsim) {
+  rf8 <- randomForest(y8_train[[k]]~., data=X_train[[k]])
+  rfrk8 <- fit_rfrk(rf8, y8_train[[k]], dist_mtx_train[[k]])
+  rfrk8_pred <- pred_rfrk(rf8, rfrk8, 
+    obsv_coord = coord_train[[k]],
+    pred_coord = coord_test[[k]],
+    Xp = X_test[[k]])
+  
+  rfrk8_rmse[k] <- compute_rmse(y8_test[[k]], rfrk8_pred[,1])
+  rfrk8_cov90[k] <- coverage(y8_test[[k]], rfrk8_pred[,1], rfrk8_pred[,2])
+}
+end_time <- Sys.time()
+end_time - start_time
+# Time difference of 4.145498 mins
+# saveRDS(rfrk8_rmse, paste0(loc_dir, 'rfrk8_rmse.rds'))
+# saveRDS(rfrk8_cov90, paste0(loc_dir, 'rfrk8_cov90.rds'))
+```
+```{r, eval=T, echo=T}
+rfrk8_rmse <- readRDS(file=paste0(loc_dir, 'rfrk8_rmse.rds'))
+rfrk8_cov90 <- readRDS(file=paste0(loc_dir, 'rfrk8_cov90.rds'))
+summary(rfrk8_rmse)
+summary(rfrk8_cov90)
+```
+
+```{r, eval=T, echo=T}
+sim_results[8, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
+  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
+  sapply(list(a8, c8, lm8_rmse, lm8_cov90, splm8_rmse, splm8_cov90, 
+    rf8_rmse, rf8_cov90, rfrk8_rmse, rfrk8_cov90), mean)
+```
+
+# Results table
+```{r, eval=T, echo=T}
+kable(sim_results, digits=3)
+# saveRDS(sim_results, file=paste0(loc_dir, 'sim_results.rds'))
+```
