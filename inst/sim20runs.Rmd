@@ -1,25 +1,30 @@
 ---
-title: "Simulation study with multiple runs"
-author: "Eric Fox"
+title: "Simulation Code"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
   html_document:
     highlighted: default
     theme: spacelab
     toc: yes
+editor_options: 
+  chunk_output_type: console
 ---
 
+The code in this R Markdown report can be used to reproduce the simulation results shown in Tables 3 and 4 of the manuscript.
+
 ```{r, eval=T, echo=T, message=F}
-devtools::load_all(".")
+# devtools::load_all(".")
 library(randomForest)
 library(ggplot2)
 library(quantregForest)
 library(knitr)
 
-# set directories
-home_dir <- '/Users/ericfox/Documents/epa/'
-proj_dir <- paste0(home_dir, 'mmigeostat_proj/mmigeostat2/')
-loc_dir <- paste0(proj_dir, 'inst/simulation/sim20runs/loc_data/')
+# set your directory path to folder containing simulation data
+# loc_dir <- "/Users/ericfox/Documents/epa/mmigeostat_proj/slmrf/inst/loc_data/"
+
+# mathematical dervations of the formulas for parameters a and c
+# used in the set_a() and set_c() functions can be found in the file 
+# sim_appendix.pdf, located in the /inst folder of the package directory 
 
 # set parameter a for simulation model
 set_a <- function(lambda, var_g, var_h) {
@@ -73,16 +78,20 @@ for(k in 1:nsim) {
 ```
 
 ```{r, eval=T, echo=T}
-# initialize data frame to store results
-sim_results <-  as.data.frame(matrix(999.9, nrow=8, ncol=14))
-names(sim_results) <- c('NL_L', 'Rsqr', 'nugg', 'parsil', 'a', 'c', 
-  'lm_rmse', 'lm_cov90', 'slm_rmse', 'slm_cov90', 
-  'rf_rmse', 'rf_cov90', 'rfrk_rmse', 'rfrk_cov90')
-rownames(sim_results) <- paste0('case', c(1:8))
-sim_results$NL_L <- rep(c('NL', 'L'), each=4)
-sim_results$Rsqr <- rep(c(0.1, 0.9), each=2, length.out = 8)
-sim_results$nugg <- rep(c(9,1), 4)
-sim_results$parsil <- rep(c(1,9), 4)
+# initialize data frames to store results for RMSPE and coverage of 90% PIs
+sim_results_rmse <-  as.data.frame(matrix(999.9, nrow=8, ncol=14))
+names(sim_results_rmse) <- c('NL_L', 'Rsqr', 'nugg', 'parsil', 'a', 'c', 
+  'lm_rmse', 'lm_rmse_sd', 'slm_rmse', 'slm_rmse_sd', 
+  'rf_rmse', 'rf_rmse_sd', 'rfrk_rmse', 'rfrk_rmse_sd')
+rownames(sim_results_rmse) <- paste0('case', c(1:8))
+sim_results_rmse$NL_L <- rep(c('NL', 'L'), each=4)
+sim_results_rmse$Rsqr <- rep(c(0.1, 0.9), each=2, length.out = 8)
+sim_results_rmse$nugg <- rep(c(9,1), 4)
+sim_results_rmse$parsil <- rep(c(1,9), 4)
+
+sim_results_cov90 <-  as.data.frame(matrix(999.9, nrow=8, ncol=4))
+names(sim_results_cov90) <- c('lm_cov90', 'slm_cov90', 'rf_cov90', 'rfrk_cov90')
+rownames(sim_results_cov90) <- paste0('case', c(1:8))
 ```
 
 
@@ -141,6 +150,8 @@ for(k in 1:nsim) {
 }
 summary(lm1_rmse)
 summary(lm1_cov90)
+# saveRDS(lm1_rmse, file=paste0(loc_dir, 'lm1_rmse.rds'))
+# saveRDS(lm1_cov90, file=paste0(loc_dir, 'lm1_cov90.rds'))
 ```
 
 ## SLM
@@ -233,10 +244,13 @@ summary(rfrk1_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[1, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a1, c1, lm1_rmse, lm1_cov90, splm1_rmse, splm1_cov90, 
-    rf1_rmse, rf1_cov90, rfrk1_rmse, rfrk1_cov90), mean)
+sim_results_rmse[1, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a1), mean(c1), mean(lm1_rmse), sd(lm1_rmse), 
+    mean(splm1_rmse), sd(splm1_rmse), mean(rf1_rmse), sd(rf1_rmse),
+    mean(rfrk1_rmse), sd(rfrk1_rmse))
+sim_results_cov90[1, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm1_cov90), mean(splm1_cov90), mean(rf1_cov90), mean(rfrk1_cov90))
 ```
 
 
@@ -295,6 +309,8 @@ for(k in 1:nsim) {
 }
 summary(lm2_rmse)
 summary(lm2_cov90)
+# saveRDS(lm2_rmse, file=paste0(loc_dir, 'lm2_rmse.rds'))
+# saveRDS(lm2_cov90, file=paste0(loc_dir, 'lm2_cov90.rds'))
 ```
 
 ## SLM
@@ -387,10 +403,13 @@ summary(rfrk2_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[2, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a2, c2, lm2_rmse, lm2_cov90, splm2_rmse, splm2_cov90, 
-    rf2_rmse, rf2_cov90, rfrk2_rmse, rfrk2_cov90), mean)
+sim_results_rmse[2, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a2), mean(c2), mean(lm2_rmse), sd(lm2_rmse), 
+    mean(splm2_rmse), sd(splm2_rmse), mean(rf2_rmse), sd(rf2_rmse),
+    mean(rfrk2_rmse), sd(rfrk2_rmse))
+sim_results_cov90[2, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm2_cov90), mean(splm2_cov90), mean(rf2_cov90), mean(rfrk2_cov90))
 ```
 
 
@@ -449,6 +468,8 @@ for(k in 1:nsim) {
 }
 summary(lm3_rmse)
 summary(lm3_cov90)
+# saveRDS(lm3_rmse, file=paste0(loc_dir, 'lm3_rmse.rds'))
+# saveRDS(lm3_cov90, file=paste0(loc_dir, 'lm3_cov90.rds'))
 ```
 
 ## SLM
@@ -541,10 +562,13 @@ summary(rfrk3_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[3, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a3, c3, lm3_rmse, lm3_cov90, splm3_rmse, splm3_cov90, 
-    rf3_rmse, rf3_cov90, rfrk3_rmse, rfrk3_cov90), mean)
+sim_results_rmse[3, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a3), mean(c3), mean(lm3_rmse), sd(lm3_rmse), 
+    mean(splm3_rmse), sd(splm3_rmse), mean(rf3_rmse), sd(rf3_rmse),
+    mean(rfrk3_rmse), sd(rfrk3_rmse))
+sim_results_cov90[3, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm3_cov90), mean(splm3_cov90), mean(rf3_cov90), mean(rfrk3_cov90))
 ```
 
 
@@ -603,6 +627,8 @@ for(k in 1:nsim) {
 }
 summary(lm4_rmse)
 summary(lm4_cov90)
+# saveRDS(lm4_rmse, file=paste0(loc_dir, 'lm4_rmse.rds'))
+# saveRDS(lm4_cov90, file=paste0(loc_dir, 'lm4_cov90.rds'))
 ```
 
 ## SLM
@@ -696,10 +722,13 @@ summary(rfrk4_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[4, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a4, c4, lm4_rmse, lm4_cov90, splm4_rmse, splm4_cov90, 
-    rf4_rmse, rf4_cov90, rfrk4_rmse, rfrk4_cov90), mean)
+sim_results_rmse[4, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a4), mean(c4), mean(lm4_rmse), sd(lm4_rmse), 
+    mean(splm4_rmse), sd(splm4_rmse), mean(rf4_rmse), sd(rf4_rmse),
+    mean(rfrk4_rmse), sd(rfrk4_rmse))
+sim_results_cov90[4, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm4_cov90), mean(splm4_cov90), mean(rf4_cov90), mean(rfrk4_cov90))
 ```
 
 
@@ -758,6 +787,8 @@ for(k in 1:nsim) {
 }
 summary(lm5_rmse)
 summary(lm5_cov90)
+# saveRDS(lm5_rmse, file=paste0(loc_dir, 'lm5_rmse.rds'))
+# saveRDS(lm5_cov90, file=paste0(loc_dir, 'lm5_cov90.rds'))
 ```
 
 ## SLM
@@ -850,10 +881,13 @@ summary(rfrk5_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[5, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a5, c5, lm5_rmse, lm5_cov90, splm5_rmse, splm5_cov90, 
-    rf5_rmse, rf5_cov90, rfrk5_rmse, rfrk5_cov90), mean)
+sim_results_rmse[5, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a5), mean(c5), mean(lm5_rmse), sd(lm5_rmse), 
+    mean(splm5_rmse), sd(splm5_rmse), mean(rf5_rmse), sd(rf5_rmse),
+    mean(rfrk5_rmse), sd(rfrk5_rmse))
+sim_results_cov90[5, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm5_cov90), mean(splm5_cov90), mean(rf5_cov90), mean(rfrk5_cov90))
 ```
 
 
@@ -912,6 +946,8 @@ for(k in 1:nsim) {
 }
 summary(lm6_rmse)
 summary(lm6_cov90)
+# saveRDS(lm6_rmse, file=paste0(loc_dir, 'lm6_rmse.rds'))
+# saveRDS(lm6_cov90, file=paste0(loc_dir, 'lm6_cov90.rds'))
 ```
 
 ## SLM
@@ -1003,10 +1039,13 @@ summary(rfrk6_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[6, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a6, c6, lm6_rmse, lm6_cov90, splm6_rmse, splm6_cov90, 
-    rf6_rmse, rf6_cov90, rfrk6_rmse, rfrk6_cov90), mean)
+sim_results_rmse[6, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a6), mean(c6), mean(lm6_rmse), sd(lm6_rmse), 
+    mean(splm6_rmse), sd(splm6_rmse), mean(rf6_rmse), sd(rf6_rmse),
+    mean(rfrk6_rmse), sd(rfrk6_rmse))
+sim_results_cov90[6, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm6_cov90), mean(splm6_cov90), mean(rf6_cov90), mean(rfrk6_cov90))
 ```
 
 
@@ -1065,6 +1104,8 @@ for(k in 1:nsim) {
 }
 summary(lm7_rmse)
 summary(lm7_cov90)
+# saveRDS(lm7_rmse, file=paste0(loc_dir, 'lm7_rmse.rds'))
+# saveRDS(lm7_cov90, file=paste0(loc_dir, 'lm7_cov90.rds'))
 ```
 
 ## SLM
@@ -1158,10 +1199,13 @@ summary(rfrk7_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[7, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a7, c7, lm7_rmse, lm7_cov90, splm7_rmse, splm7_cov90, 
-    rf7_rmse, rf7_cov90, rfrk7_rmse, rfrk7_cov90), mean)
+sim_results_rmse[7, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a7), mean(c7), mean(lm7_rmse), sd(lm7_rmse), 
+    mean(splm7_rmse), sd(splm7_rmse), mean(rf7_rmse), sd(rf7_rmse),
+    mean(rfrk7_rmse), sd(rfrk7_rmse))
+sim_results_cov90[7, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm7_cov90), mean(splm7_cov90), mean(rf7_cov90), mean(rfrk7_cov90))
 ```
 
 
@@ -1220,6 +1264,8 @@ for(k in 1:nsim) {
 }
 summary(lm8_rmse)
 summary(lm8_cov90)
+# saveRDS(lm8_rmse, file=paste0(loc_dir, 'lm8_rmse.rds'))
+# saveRDS(lm8_cov90, file=paste0(loc_dir, 'lm8_cov90.rds'))
 ```
 ## SLM
 ```{r, eval=F, echo=T}
@@ -1312,14 +1358,30 @@ summary(rfrk8_cov90)
 ```
 
 ```{r, eval=T, echo=T}
-sim_results[8, c("a", "c", "lm_rmse", "lm_cov90", "slm_rmse", "slm_cov90", 
-  "rf_rmse", "rf_cov90", "rfrk_rmse", "rfrk_cov90")] <- 
-  sapply(list(a8, c8, lm8_rmse, lm8_cov90, splm8_rmse, splm8_cov90, 
-    rf8_rmse, rf8_cov90, rfrk8_rmse, rfrk8_cov90), mean)
+sim_results_rmse[8, c("a", "c", "lm_rmse", "lm_rmse_sd", "slm_rmse", 
+  "slm_rmse_sd", "rf_rmse", "rf_rmse_sd", "rfrk_rmse", "rfrk_rmse_sd")] <-
+  c(mean(a8), mean(c8), mean(lm8_rmse), sd(lm8_rmse), 
+    mean(splm8_rmse), sd(splm8_rmse), mean(rf8_rmse), sd(rf8_rmse),
+    mean(rfrk8_rmse), sd(rfrk8_rmse))
+sim_results_cov90[8, c("lm_cov90", "slm_cov90", "rf_cov90", "rfrk_cov90")] <- 
+  c(mean(lm8_cov90), mean(splm8_cov90), mean(rf8_cov90), mean(rfrk8_cov90))
 ```
 
 # Results table
-```{r, eval=T, echo=T}
-kable(sim_results, digits=3)
-# saveRDS(sim_results, file=paste0(loc_dir, 'sim_results.rds'))
+
+```{r}
+# calculate standard errors for RMSE 
+sim_results_rmse2 <- sim_results_rmse
+names(sim_results_rmse2) <- c("NL_L", "Rsqr", "nugg", "parsil", "a", "c", 
+  "lm_rmse", "lm_rmse_se", "slm_rmse", "slm_rmse_se", 
+  "rf_rmse", "rf_rmse_se", "rfrk_rmse", "rfrk_rmse_se")
+sim_results_rmse2$lm_rmse_se <- sim_results_rmse$lm_rmse_sd / sqrt(20)
+sim_results_rmse2$slm_rmse_se <- sim_results_rmse$slm_rmse_sd / sqrt(20)
+sim_results_rmse2$rf_rmse_se <- sim_results_rmse$rf_rmse_sd / sqrt(20)
+sim_results_rmse2$rfrk_rmse_se <- sim_results_rmse$rfrk_rmse_sd / sqrt(20)
+# table with RMSE
+kable(sim_results_rmse2, digits=3)
+# table with coverages of 90% confidence intervals
+kable(sim_results_cov90, digits=3)
 ```
+
