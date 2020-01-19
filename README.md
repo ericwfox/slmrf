@@ -6,7 +6,7 @@ To install:
 
 * using the `devtools` package: `install_github("ericwfox/slmrf")`
 
-In addition to the simulation code, the cleaned MMI response data and StreamCat covariates, which were used to fit the spatial regression and random forest models in the paper, can be accessed in this R package.  To load the data sets run the following commands:
+In addition to the simulation code, the MMI response data and StreamCat covariates, which were used to fit the models in the paper, can be accessed in this R package.  To load the data sets run the following commands:
 
 `data("mmi_data")`
 
