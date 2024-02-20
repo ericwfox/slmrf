@@ -1,0 +1,47 @@
+\documentclass{article}
+\usepackage{amsmath}
+%\usepackage[top=1in, bottom=1.25in, left=0.5in, right=0.5in]{geometry}
+\usepackage{geometry}
+\usepackage{color}
+\usepackage{graphicx}
+\usepackage{bm}
+
+\begin{document}
+\setlength\parindent{0pt}
+\section*{Simulation Appendix}
+
+Some mathematical details for setting values for parameters $a$ and $c$ in the simulations:\\
+1.  Consider the simplified case:
+\begin{align*}
+y(s) = f(x_1, \cdots, x_4) + \delta(s) = a g(x_1,x_2) +  h(x_3, x_4) + \delta(s)
+\end{align*}
+where $var(g) = \sigma_g^2$ and $var(h) = \sigma_h^2$ are computed empirically.  Find $a$ for a given fixed value of $var(ag) / var(f) = \lambda$ (i.e., the proportion of variance in $f$ explained by the nonlinear component is fixed).
+\begin{align*}
+\lambda &= \frac{a^2 \sigma_g^2}{a^2 \sigma_g^2 + \sigma_h^2} \implies \lambda a^2 \sigma_g^2 + \lambda \sigma_h^2 = a^2 \sigma_g^2\\
+&\implies \lambda \sigma_h^2 = a^2 \sigma_g^2 - \lambda a^2 \sigma_g^2 = a^2(1-\lambda)\sigma_g^2\\
+&\implies a = \sqrt{\frac{\lambda \sigma_h^2}{(1-\lambda)\sigma_g^2}}
+\end{align*}
+
+2. Now consider the more general case:
+\begin{align*}
+y(s) &= c f(x_1, \cdots, x_4) + \delta(s)\\
+&= c[a g(x_1,x_2) +  h(x_3, x_4)] + \delta(s)
+\end{align*}
+where $var(f) = \sigma_f^2$ and $var(\delta) = \sigma_d^2$ are computed empirically.  Find $c$ for a given fixed value of $R^2 = \rho$ (i.e, the proportion of variance in $y$ explained by the covariates is fixed).
+\begin{align*}
+R^2 &= \rho = \frac{var(cf)}{var(y)} = \frac{c^2 \sigma_f^2}{c^2\sigma_f^2 + \sigma_d^2}\\
+&\implies \rho (c^2\sigma_f^2 + \sigma_d^2) = c^2 \sigma_f^2\\
+&\implies \rho \sigma_d^2 = c^2 \sigma_f^2 - \rho c^2\sigma_f^2 = c^2(1-\rho)\sigma_f^2\\
+&\implies c = \sqrt{\frac{\rho \sigma_d^2}{(1-\rho)\sigma_f^2}}
+\end{align*}
+Since $\sigma_f^2 = a^2 \sigma_g^2 + \sigma_h^2$ we can also express $c$ as
+\begin{align*}
+c = \sqrt{\frac{\rho \sigma_d^2}{(1-\rho) (a^2 \sigma_g^2 + \sigma_h^2)}}
+\end{align*}
+
+Note the $R^2$ and $\lambda$ values vary in R since the above derivation assume independence between model components (which is true in the expectation for the population).\\
+
+
+
+
+\end{document}
